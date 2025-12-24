@@ -1,0 +1,169 @@
+name: Nightly E2E Tests
+
+on:
+  schedule:
+    # Run every day at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  e2e-kind:
+    name: E2E Tests on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build kubac CLI
+        run: |
+          go build -v -o kubac ./cmd/kubac
+          chmod +x kubac
+          sudo mv kubac /usr/local/bin/
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kubac-test
+          config: test/kind/kind-config.yaml
+
+      - name: Verify cluster access
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Run kubac doctor
+        run: kubac doctor
+
+      - name: Initialize kubac
+        run: |
+          kubac init --cluster-profile=local --mode=direct
+
+      - name: Install kubac platform
+        run: |
+          kubac install --mode=direct --cluster-profile=local
+
+      - name: Wait for platform components
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=metrics-server -n kube-system --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kube-state-metrics -n kubac-system --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=kyverno -n kyverno --timeout=300s || true
+
+      - name: Deploy demo application
+        run: kubac demo deploy
+
+      - name: Wait for demo app
+        run: |
+          kubectl wait --for=condition=ready pod -l app=demo -n kubac-demo --timeout=300s
+
+      - name: Run verification suite
+        run: |
+          kubac verify --output=json --report=verify-report.json
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report
+          path: verify-report.json
+
+      - name: Test demo load
+        run: |
+          kubac demo load --duration=30s
+
+      - name: Test demo chaos
+        run: |
+          kubac demo chaos
+
+      - name: Collect debug info
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl get events -A --sort-by='.lastTimestamp'
+          kubectl describe pods -n kubac-demo
+          kubectl logs -n kyverno -l app=kyverno --tail=100
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kubac demo cleanup || true
+          kubac uninstall --force || true
+
+  e2e-k3d:
+    name: E2E Tests on k3d
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build kubac CLI
+        run: |
+          go build -v -o kubac ./cmd/kubac
+          chmod +x kubac
+          sudo mv kubac /usr/local/bin/
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+      - name: Create k3d cluster
+        run: |
+          k3d cluster create kubac-test --agents 2 --wait
+
+      - name: Verify cluster access
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Run kubac doctor
+        run: kubac doctor
+
+      - name: Initialize kubac
+        run: |
+          kubac init --cluster-profile=local --mode=direct
+
+      - name: Install kubac platform
+        run: |
+          kubac install --mode=direct --cluster-profile=local
+
+      - name: Wait for platform components
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=metrics-server -n kube-system --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kube-state-metrics -n kubac-system --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=kyverno -n kyverno --timeout=300s || true
+
+      - name: Deploy demo application
+        run: kubac demo deploy
+
+      - name: Wait for demo app
+        run: |
+          kubectl wait --for=condition=ready pod -l app=demo -n kubac-demo --timeout=300s
+
+      - name: Run verification suite
+        run: |
+          kubac verify --output=json --report=verify-report-k3d.json
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report-k3d
+          path: verify-report-k3d.json
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kubac demo cleanup || true
+          kubac uninstall --force || true
+          k3d cluster delete kubac-test || true

@@ -1,0 +1,40 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-load-test
+  namespace: kubac-demo
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: load
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting load test against demo service..."
+              for i in $(seq 1 1000); do
+                wget -q -O- http://demo.kubac-demo.svc.cluster.local/ || true
+                sleep 0.1
+              done
+              echo "Load test completed"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
